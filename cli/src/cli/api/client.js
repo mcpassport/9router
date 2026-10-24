@@ -503,6 +503,120 @@ async function disableTunnel() {
 }
 
 // ============================================================================
+// USAGE & LOGS API
+// ============================================================================
+
+/**
+ * Get recent request logs
+ * @param {number} [limit=100] - Number of logs to retrieve
+ * @returns {Promise<Object>} { success, data }
+ */
+async function getRecentLogs(limit = 100) {
+  return makeRequest("GET", "/api/usage/logs");
+}
+
+/**
+ * Get usage stats
+ * @param {string} [period="all"] - Time period (e.g. today, 24h, 7d, 30d, 60d, all)
+ * @returns {Promise<Object>} { success, data }
+ */
+async function getUsageStats(period = "all") {
+  return makeRequest("GET", `/api/usage/stats?period=${encodeURIComponent(period)}`);
+}
+
+/**
+ * Stream console logs via SSE
+ * @param {Function} onLine - Called with each log line
+ * @param {Function} [onError] - Called on error
+ * @param {Function} [onEnd] - Called when stream ends
+ * @returns {{ close: () => void }} Object with close function
+ */
+function streamConsoleLogs(onLine, onError, onEnd) {
+  const httpModule = config.protocol === "https:" ? https : http;
+  let closed = false;
+
+  const options = {
+    hostname: config.host,
+    port: config.port,
+    path: "/api/translator/console-logs/stream",
+    method: "GET",
+    headers: {
+      Accept: "text/event-stream",
+      [CLI_TOKEN_HEADER]: getCliToken(),
+    },
+  };
+
+  function handleSseLine(rawLine) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || !trimmed.startsWith("data:")) return;
+    const dataStr = trimmed.slice(5).trim();
+    if (!dataStr) return;
+
+    try {
+      const parsed = JSON.parse(dataStr);
+      if (typeof parsed === "string") {
+        onLine?.(parsed);
+      } else if (parsed && typeof parsed === "object") {
+        if (typeof parsed.line === "string") {
+          onLine?.(parsed.line);
+        } else if (Array.isArray(parsed.lines)) {
+          for (const l of parsed.lines) {
+            if (typeof l === "string") onLine?.(l);
+          }
+        } else if (Array.isArray(parsed.logs)) {
+          for (const l of parsed.logs) {
+            if (typeof l === "string") onLine?.(l);
+          }
+        }
+      }
+    } catch {
+      if (dataStr) onLine?.(dataStr);
+    }
+  }
+
+  const req = httpModule.request(options, (res) => {
+    if (res.statusCode >= 400) {
+      if (!closed) onError?.(new Error(`HTTP ${res.statusCode}`));
+      return;
+    }
+
+    let buffer = "";
+    res.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) {
+        handleSseLine(line);
+      }
+    });
+
+    res.on("end", () => {
+      if (buffer.trim()) {
+        handleSseLine(buffer);
+      }
+      if (!closed) onEnd?.();
+    });
+
+    res.on("error", (err) => {
+      if (!closed) onError?.(err);
+    });
+  });
+
+  req.on("error", (err) => {
+    if (!closed) onError?.(err);
+  });
+
+  req.end();
+
+  return {
+    close: () => {
+      closed = true;
+      req.destroy();
+    },
+  };
+}
+
+// ============================================================================
 // EXPORTS
 // ============================================================================
 
@@ -555,7 +669,12 @@ module.exports = {
   getTunnelStatus,
   enableTunnel,
   disableTunnel,
-  
+
+  // Usage & Logs
+  getRecentLogs,
+  getUsageStats,
+  streamConsoleLogs,
+
   // Models
   getModels,
   getAvailableModels,

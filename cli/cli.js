@@ -94,6 +94,28 @@ if (args[0] === "connect" || args[0] === "show") {
   return;
 }
 
+if (args[0] === "logs") {
+  const { run } = require("./src/cli/commands/logs");
+  run(args.slice(1))
+    .then((code) => process.exit(code))
+    .catch((err) => {
+      console.error(`❌ ${err?.message || err}`);
+      process.exit(1);
+    });
+  return;
+}
+
+if (args[0] === "quota") {
+  const { run } = require("./src/cli/commands/quota");
+  run(args.slice(1))
+    .then((code) => process.exit(code))
+    .catch((err) => {
+      console.error(`❌ ${err?.message || err}`);
+      process.exit(1);
+    });
+  return;
+}
+
 // Self-heal SQLite runtime deps (sql.js + better-sqlite3) into ~/.9router/runtime
 // so the server can resolve them via NODE_PATH. Best-effort — sql.js is required,
 // better-sqlite3 is optional. Logs to stderr only on failure.
@@ -168,6 +190,8 @@ Options:
   -v, --version       Show version
 
 Commands:
+  quota [options]     Check token usage, costs, and request stats
+  logs [options]      View or follow recent gateway logs with filters
   connect <server-url> Configure Claude Code for a remote 9router server
                       (npx 9router connect http://host:20128 — no install needed)
   show [tool…]        Show each CLI tool's current 9router config and models

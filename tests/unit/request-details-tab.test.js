@@ -22,14 +22,17 @@ beforeAll(async () => {
   vi.resetModules();
   db = await import("@/lib/db/index.js");
   await db.initDb();
-  await db.updateSettings({ enableObservability2: true, observabilityBatchSize: 1 });
+  await db.updateSettings({ enableObservability: true, observabilityBatchSize: 1 });
 
   const { getAdapter } = await import("@/lib/db/driver.js");
   adapter = await getAdapter();
 });
 
 afterAll(() => {
-  if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
+  try { adapter?.close?.(); } catch {}
+  if (tempDir) {
+    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+  }
   if (originalDataDir === undefined) delete process.env.DATA_DIR;
   else process.env.DATA_DIR = originalDataDir;
 });
@@ -250,3 +253,83 @@ describe("API route contract — validation boundary", () => {
     expect(body.pagination).toMatchObject({ page: 1, pageSize: 20 });
   });
 });
+
+describe("model & combo filtering logic", () => {
+  function matchesCombo(detail, comboName, combosList) {
+    if (!comboName) return true;
+
+    const comboLower = comboName.toLowerCase();
+    const detailModel = (detail?.model || "").toLowerCase();
+    const reqModel = (detail?.request?.model || "").toLowerCase();
+
+    if (detailModel === comboLower || reqModel === comboLower) {
+      return true;
+    }
+
+    const combo = (combosList || []).find(
+      (c) => c?.name?.toLowerCase() === comboLower || c?.id === comboName
+    );
+    if (combo && Array.isArray(combo.models)) {
+      return combo.models.some((m) => {
+        if (!m || typeof m !== "string") return false;
+        const mLower = m.toLowerCase();
+        if (detailModel === mLower || reqModel === mLower) return true;
+
+        const strippedM = mLower.includes("/") ? mLower.split("/")[1] : mLower;
+        const strippedDetail = detailModel.includes("/") ? detailModel.split("/")[1] : detailModel;
+        const strippedReq = reqModel.includes("/") ? reqModel.split("/")[1] : reqModel;
+        return strippedDetail === strippedM || strippedReq === strippedM;
+      });
+    }
+
+    return false;
+  }
+
+  const combos = [
+    {
+      id: "combo-1",
+      name: "smart-router",
+      models: ["openai/gpt-4o", "anthropic/claude-3-5-sonnet"],
+    },
+    {
+      id: "combo-2",
+      name: "fast-cheap",
+      models: ["deepseek/deepseek-chat", "groq/llama-3.1-8b"],
+    },
+  ];
+
+  it("empty combo filter matches everything", () => {
+    expect(matchesCombo({ model: "gpt-4o" }, "", combos)).toBe(true);
+    expect(matchesCombo({ model: "random" }, null, combos)).toBe(true);
+  });
+
+  it("matches when detail.model equals combo name directly", () => {
+    expect(matchesCombo({ model: "smart-router" }, "smart-router", combos)).toBe(true);
+    expect(matchesCombo({ model: "SMART-ROUTER" }, "smart-router", combos)).toBe(true);
+  });
+
+  it("matches when detail.request.model equals combo name", () => {
+    expect(matchesCombo({ model: "gpt-4o", request: { model: "smart-router" } }, "smart-router", combos)).toBe(true);
+  });
+
+  it("matches when detail.model is in combo models (exact fullModel)", () => {
+    expect(matchesCombo({ model: "openai/gpt-4o" }, "smart-router", combos)).toBe(true);
+    expect(matchesCombo({ model: "anthropic/claude-3-5-sonnet" }, "smart-router", combos)).toBe(true);
+  });
+
+  it("matches when detail.model is in combo models without provider prefix", () => {
+    expect(matchesCombo({ model: "gpt-4o" }, "smart-router", combos)).toBe(true);
+    expect(matchesCombo({ model: "claude-3-5-sonnet" }, "smart-router", combos)).toBe(true);
+  });
+
+  it("does not match when detail.model is outside combo", () => {
+    expect(matchesCombo({ model: "deepseek/deepseek-chat" }, "smart-router", combos)).toBe(false);
+    expect(matchesCombo({ model: "gemini-1.5-pro" }, "smart-router", combos)).toBe(false);
+  });
+
+  it("matches case-insensitively", () => {
+    expect(matchesCombo({ model: "OpenAI/GPT-4O" }, "SMART-ROUTER", combos)).toBe(true);
+    expect(matchesCombo({ model: "Claude-3-5-Sonnet" }, "smart-router", combos)).toBe(true);
+  });
+});
+

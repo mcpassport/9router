@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import Card from "@/shared/components/Card";
 import Button from "@/shared/components/Button";
+import Input from "@/shared/components/Input";
 import Drawer from "@/shared/components/Drawer";
 import Pagination from "@/shared/components/Pagination";
 import { cn } from "@/shared/utils/cn";
@@ -99,6 +100,39 @@ function getInputTokens(tokens) {
   return prompt < cache ? cache : prompt;
 }
 
+function matchesCombo(detail, comboName, combosList) {
+  if (!comboName) return true;
+
+  const comboLower = comboName.toLowerCase();
+  const detailModel = (detail?.model || "").toLowerCase();
+  const reqModel = (detail?.request?.model || "").toLowerCase();
+
+  // 1. Direct name match on detail.model or detail.request.model
+  if (detailModel === comboLower || reqModel === comboLower) {
+    return true;
+  }
+
+  // 2. Match against models in the combo definition
+  const combo = (combosList || []).find(
+    (c) => c?.name?.toLowerCase() === comboLower || c?.id === comboName
+  );
+  if (combo && Array.isArray(combo.models)) {
+    return combo.models.some((m) => {
+      if (!m || typeof m !== "string") return false;
+      const mLower = m.toLowerCase();
+      if (detailModel === mLower || reqModel === mLower) return true;
+
+      // Match stripped model (e.g. combo has "openai/gpt-4o", detail has "gpt-4o")
+      const strippedM = mLower.includes("/") ? mLower.split("/")[1] : mLower;
+      const strippedDetail = detailModel.includes("/") ? detailModel.split("/")[1] : detailModel;
+      const strippedReq = reqModel.includes("/") ? reqModel.split("/")[1] : reqModel;
+      return strippedDetail === strippedM || strippedReq === strippedM;
+    });
+  }
+
+  return false;
+}
+
 export default function RequestDetailsTab() {
   const [details, setDetails] = useState([]);
   const [pagination, setPagination] = useState({
@@ -111,9 +145,13 @@ export default function RequestDetailsTab() {
   const [selectedDetail, setSelectedDetail] = useState(null);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [providers, setProviders] = useState([]);
+  const [availableModels, setAvailableModels] = useState([]);
+  const [combos, setCombos] = useState([]);
   const [providerNameCache, setProviderNameCache] = useState(null);
   const [filters, setFilters] = useState({
     provider: "",
+    model: "",
+    combo: "",
     startDate: "",
     endDate: ""
   });
@@ -128,6 +166,26 @@ export default function RequestDetailsTab() {
       setProviderNameCache(cache.providerNameCache);
     } catch (error) {
       console.error("Failed to fetch providers:", error);
+    }
+  }, []);
+
+  const fetchModels = useCallback(async () => {
+    try {
+      const res = await fetch("/api/models");
+      const data = await res.json();
+      setAvailableModels(data.models || []);
+    } catch (error) {
+      console.error("Failed to fetch models:", error);
+    }
+  }, []);
+
+  const fetchCombos = useCallback(async () => {
+    try {
+      const res = await fetch("/api/combos");
+      const data = await res.json();
+      setCombos(data.combos || []);
+    } catch (error) {
+      console.error("Failed to fetch combos:", error);
     }
   }, []);
 
@@ -152,15 +210,73 @@ export default function RequestDetailsTab() {
     } finally {
       setLoading(false);
     }
-  }, [pagination.page, pagination.pageSize, filters]);
+  }, [pagination.page, pagination.pageSize, filters.provider, filters.startDate, filters.endDate]);
 
   useEffect(() => {
-    fetchProviders();
-  }, [fetchProviders]);
+    let ignore = false;
+    const loadFilters = async () => {
+      await Promise.all([fetchProviders(), fetchModels(), fetchCombos()]);
+    };
+    loadFilters();
+    return () => { ignore = true; };
+  }, [fetchProviders, fetchModels, fetchCombos]);
 
   useEffect(() => {
-    fetchDetails();
+    let ignore = false;
+    const loadDetails = async () => {
+      await fetchDetails();
+    };
+    loadDetails();
+    return () => { ignore = true; };
   }, [fetchDetails]);
+
+  const modelOptions = useMemo(() => {
+    const set = new Set();
+    for (const m of availableModels) {
+      if (typeof m === "string") {
+        set.add(m);
+      } else if (m && typeof m === "object") {
+        if (m.model) set.add(m.model);
+        if (m.fullModel) set.add(m.fullModel);
+        if (m.routedModel) set.add(m.routedModel);
+        if (m.id) set.add(m.id);
+      }
+    }
+    for (const d of details) {
+      if (d?.model) set.add(d.model);
+    }
+    for (const c of combos) {
+      if (Array.isArray(c?.models)) {
+        for (const m of c.models) {
+          if (m) set.add(m);
+        }
+      }
+    }
+    return Array.from(set).filter(Boolean).sort((a, b) => a.localeCompare(b));
+  }, [availableModels, details, combos]);
+
+  const filteredDetails = useMemo(() => {
+    return details.filter((detail) => {
+      // Model filter: case-insensitive substring or exact match
+      if (filters.model) {
+        const query = filters.model.trim().toLowerCase();
+        const detailModel = (detail?.model || "").toLowerCase();
+        const reqModel = (detail?.request?.model || "").toLowerCase();
+        if (!detailModel.includes(query) && !reqModel.includes(query)) {
+          return false;
+        }
+      }
+
+      // Combo filter
+      if (filters.combo) {
+        if (!matchesCombo(detail, filters.combo, combos)) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+  }, [details, filters.model, filters.combo, combos]);
 
   const handleViewDetail = (detail) => {
     setSelectedDetail(detail);
@@ -176,19 +292,29 @@ export default function RequestDetailsTab() {
   };
 
   const handleClearFilters = () => {
-    setFilters({ provider: "", startDate: "", endDate: "" });
+    setFilters({
+      provider: "",
+      model: "",
+      combo: "",
+      startDate: "",
+      endDate: ""
+    });
+    setPagination(prev => ({ ...prev, page: 1 }));
   };
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
       <Card padding="md">
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
           <div className="flex min-w-0 flex-col gap-2">
             <label htmlFor="provider-filter" className="text-sm font-medium text-text-main">Provider</label>
             <select
               id="provider-filter"
               value={filters.provider}
-              onChange={(e) => setFilters({ ...filters, provider: e.target.value })}
+              onChange={(e) => {
+                setFilters((prev) => ({ ...prev, provider: e.target.value }));
+                setPagination((prev) => ({ ...prev, page: 1 }));
+              }}
               className={cn(
                 "h-9 px-3 rounded-lg border border-black/10 dark:border-white/10 bg-surface",
                 "text-sm text-text-main focus:outline-none focus:ring-2 focus:ring-primary/20",
@@ -204,14 +330,64 @@ export default function RequestDetailsTab() {
               ))}
             </select>
           </div>
-          
+
+          <div className="flex min-w-0 flex-col gap-2">
+            <label htmlFor="model-filter" className="text-sm font-medium text-text-main">Model</label>
+            <Input
+              id="model-filter"
+              type="text"
+              placeholder="All Models / Search..."
+              value={filters.model}
+              onChange={(e) => {
+                setFilters((prev) => ({ ...prev, model: e.target.value }));
+                setPagination((prev) => ({ ...prev, page: 1 }));
+              }}
+              list="model-filter-options"
+              className="w-full"
+              inputClassName="h-9 py-0 px-3 rounded-lg border border-black/10 dark:border-white/10 bg-surface text-sm text-text-main focus:outline-none focus:ring-2 focus:ring-primary/20"
+            />
+            <datalist id="model-filter-options">
+              {modelOptions.map((m) => (
+                <option key={m} value={m} />
+              ))}
+            </datalist>
+          </div>
+
+          <div className="flex min-w-0 flex-col gap-2">
+            <label htmlFor="combo-filter" className="text-sm font-medium text-text-main">Combo</label>
+            <select
+              id="combo-filter"
+              value={filters.combo}
+              onChange={(e) => {
+                setFilters((prev) => ({ ...prev, combo: e.target.value }));
+                setPagination((prev) => ({ ...prev, page: 1 }));
+              }}
+              className={cn(
+                "h-9 px-3 rounded-lg border border-black/10 dark:border-white/10 bg-surface",
+                "text-sm text-text-main focus:outline-none focus:ring-2 focus:ring-primary/20",
+                "w-full min-w-0 cursor-pointer"
+              )}
+              style={{ colorScheme: 'auto' }}
+            >
+              <option value="">All Combos</option>
+              {combos.map((combo) => (
+                <option key={combo.id || combo.name} value={combo.name}>
+                  {combo.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
           <div className="flex min-w-0 flex-col gap-2">
             <label htmlFor="start-date-filter" className="text-sm font-medium text-text-main">Start Date</label>
             <input
               id="start-date-filter"
               type="datetime-local"
               value={filters.startDate}
-              onChange={(e) => setFilters({ ...filters, startDate: e.target.value })}
+              onChange={(e) => {
+                setFilters((prev) => ({ ...prev, startDate: e.target.value }));
+                setPagination((prev) => ({ ...prev, page: 1 }));
+              }}
               className={cn(
                 "h-9 px-3 rounded-lg border border-black/10 dark:border-white/10 bg-surface",
                 "w-full min-w-0 text-sm text-text-main focus:outline-none focus:ring-2 focus:ring-primary/20"
@@ -225,21 +401,23 @@ export default function RequestDetailsTab() {
               id="end-date-filter"
               type="datetime-local"
               value={filters.endDate}
-              onChange={(e) => setFilters({ ...filters, endDate: e.target.value })}
+              onChange={(e) => {
+                setFilters((prev) => ({ ...prev, endDate: e.target.value }));
+                setPagination((prev) => ({ ...prev, page: 1 }));
+              }}
               className={cn(
                 "h-9 px-3 rounded-lg border border-black/10 dark:border-white/10 bg-surface",
                 "w-full min-w-0 text-sm text-text-main focus:outline-none focus:ring-2 focus:ring-primary/20"
               )}
             />
           </div>
-          
-          <div className="flex min-w-0 flex-col gap-2 sm:col-span-2 lg:col-span-1">
-            <span className="hidden text-sm font-medium text-text-main opacity-0 lg:block" aria-hidden="true">Clear</span>
-            <Button 
-              variant="ghost" 
+
+          <div className="flex min-w-0 flex-col justify-end">
+            <Button
+              variant="ghost"
               onClick={handleClearFilters}
-              disabled={!filters.provider && !filters.startDate && !filters.endDate}
-              className="w-full"
+              disabled={!filters.provider && !filters.model && !filters.combo && !filters.startDate && !filters.endDate}
+              className="h-9 w-full"
             >
               Clear Filters
             </Button>
@@ -266,21 +444,21 @@ export default function RequestDetailsTab() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan="7" className="p-8 text-center text-text-muted">
+                  <td colSpan="9" className="p-8 text-center text-text-muted">
                     <div className="flex items-center justify-center gap-2">
                       <span className="material-symbols-outlined animate-spin text-[20px]">progress_activity</span>
                       Loading...
                     </div>
                   </td>
                 </tr>
-              ) : details.length === 0 ? (
+              ) : filteredDetails.length === 0 ? (
                 <tr>
-                  <td colSpan="7" className="p-8 text-center text-text-muted">
+                  <td colSpan="9" className="p-8 text-center text-text-muted">
                     No request details found
                   </td>
                 </tr>
               ) : (
-                details.map((detail, index) => (
+                filteredDetails.map((detail, index) => (
                   <tr
                     key={`${detail.id}-${index}`}
                     className="border-b border-black/5 dark:border-white/5 last:border-b-0 hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors"
@@ -330,7 +508,7 @@ export default function RequestDetailsTab() {
           </table>
         </div>
 
-        {!loading && details.length > 0 && (
+        {!loading && filteredDetails.length > 0 && (
           <div className="border-t border-black/5 dark:border-white/5">
             <Pagination
               currentPage={pagination.page}
